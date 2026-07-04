@@ -11,7 +11,13 @@ After long quiet stretches the game whispers an oblique hint, never a command.
 When all seven have been found, the words you earned orbit you and the sky
 turns toward dawn.
 
-## Run it
+## Play it
+
+Easiest: open **https://misterclarity.github.io/the-remembering/** in the
+Quest browser and tap the goggles icon. Deployed automatically from `main`
+by the Pages workflow.
+
+Local/offline alternative:
 
 ```
 bash ~/the-remembering/serve.sh
