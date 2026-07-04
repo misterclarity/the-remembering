@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <title>The Remembering</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+  <script src="vendor/aframe.min.js"></script>
   <script src="game.js"></script>
   <style>
     #intro {
@@ -51,6 +51,8 @@
       </a-entity>
       <a-entity id="handL" meta-touch-controls="hand: left"></a-entity>
       <a-entity id="handR" meta-touch-controls="hand: right"></a-entity>
+      <a-entity id="htrackL" hand-tracking-controls="hand: left; modelColor: #33465a"></a-entity>
+      <a-entity id="htrackR" hand-tracking-controls="hand: right; modelColor: #33465a"></a-entity>
     </a-entity>
 
   </a-scene>

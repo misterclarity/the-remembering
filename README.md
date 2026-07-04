@@ -61,6 +61,39 @@ and passes through three felt milestones. Fully awake, the ending gains an
 eighth orbiting word: **Awake**. Off-beat flailing breaks the streak;
 simply standing and listening never punishes.
 
+Fully awake, a quieter triangle tick hides **between** the beats — sync to
+those offbeats eight in a row for a rare, once-only answer.
+
+### Body and feel
+
+- **Haptics**: both controllers thump with the circle's heartbeat (stronger
+  up close) and buzz on every discovery and echo.
+- **Light trails** follow both hands, brighter with awareness — you can see
+  the shapes you draw.
+- **Warmth ramp**: while a hold-gesture is in progress the hands glow and a
+  quiet tone swells, so near-misses feel like *something waking*.
+- **Echoes**: repeating a found gesture answers with a quiet chime, shimmer
+  burst, and a soft buzz (per-gesture cooldown).
+- **Guide wisps**: at higher awareness, hints stop being words — a wisp
+  performs the missing gesture near you (rises skyward, two merge at the
+  chest, traces a circle, orbits you...).
+- **Hand tracking**: put the controllers down and play with bare hands
+  (`hand-tracking-controls`); the gesture engine reads whichever source is
+  live. Locomotion still needs the sticks.
+- **Positional audio**: the heartbeat is *located* at the circle (hunt it
+  by ear), chimes come from where things happen.
+- **Comfort**: vignette during smooth locomotion and snap turns; the
+  near-floor threshold for the ground gesture scales with your measured
+  head height, so seated play works.
+
+### The mirror pond
+
+A still disc of water to the southeast wears the sky's color. At the
+ending it fills with your earned words as a constellation on the surface —
+and the ending poem itself is assembled from how you actually played:
+which gesture came first and last, which hand drew the circle, how quiet
+or restless you were, whether you learned to keep time.
+
 ## Tuning
 
 Everything lives in `game.js`:
@@ -75,7 +108,6 @@ Everything lives in `game.js`:
 - Locomotion: speed and snap angle in `tickMove()`.
 - All visuals: the `fx*` functions.
 
-Audio is synthesized (WebAudio drone + pentatonic chimes) — no assets, the
-whole game is `index.html` + `game.js` and works offline once A-Frame is
-cached (swap the CDN `<script>` for a local copy of `aframe.min.js` to be
-fully self-contained).
+Audio is synthesized (WebAudio drone + pentatonic chimes) — no assets
+beyond the vendored `vendor/aframe.min.js`, so the game is fully
+self-contained and works without any CDN.

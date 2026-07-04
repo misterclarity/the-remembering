@@ -50,11 +50,12 @@ AFRAME.registerComponent('soul-game', {
     var self = this;
     var sceneEl = this.el;
 
-    this.head  = document.getElementById('head');
-    this.rig   = document.getElementById('rig');
-    this.hands = { L: document.getElementById('handL'), R: document.getElementById('handR') };
-    this.msgEl = document.getElementById('msg');
-    this.skyEl = document.getElementById('sky');
+    this.head   = document.getElementById('head');
+    this.rig    = document.getElementById('rig');
+    this.hands  = { L: document.getElementById('handL'), R: document.getElementById('handR') };
+    this.htrack = { L: document.getElementById('htrackL'), R: document.getElementById('htrackR') };
+    this.msgEl  = document.getElementById('msg');
+    this.skyEl  = document.getElementById('sky');
 
     // gesture state
     this.done = {};
@@ -106,8 +107,25 @@ AFRAME.registerComponent('soul-game', {
     this.motionInst = 0;
     this.lastHeadY = 1.6;
 
+    // deeper rhythm, offered only once fully aware
+    this.offbeatTimes = [];
+    this.deepStreak = 0;
+    this.deepDone = false;
+    this.lastBeatHapticT = -10;
+
     // locomotion (left stick move, right stick snap turn)
     this.move = { x: 0, y: 0, turn: 0, snapReady: true };
+    this.vignetteTarget = 0;
+    this.vignetteOpacity = 0;
+
+    // who the player turned out to be
+    this.discoveryOrder = [];
+    this.circleHand = null;
+    this.stillTime = 0;
+    this.moveTime = 0;
+    this.headBase = 1.6;                      // slow height baseline, for seated players
+    this.warm = 0;                            // 0..1, strongest in-progress hold
+    this.echoCool = {};                       // per-gesture echo cooldowns
 
     this.v1 = new THREE.Vector3();
     this.v2 = new THREE.Vector3();
@@ -168,6 +186,127 @@ AFRAME.registerComponent('soul-game', {
     });
 
     this.buildWorld();
+    this.buildBody();
+  },
+
+  // hand pose from whichever source is live: touch controller, else tracked bare hand
+  getHandPos: function (side, target) {
+    if (this.connected[side]) return this.hands[side].object3D.getWorldPosition(target);
+    var ht = this.htrack[side];
+    if (ht && ht.object3D.position.lengthSq() > 1e-6) return ht.object3D.getWorldPosition(target);
+    return null;
+  },
+
+  haptic: function (side, intensity, ms) {
+    var tc = this.hands[side].components['tracked-controls'];
+    var gp = tc && tc.controller && tc.controller.gamepad;
+    var ha = gp && gp.hapticActuators;
+    if (ha && ha[0] && ha[0].pulse) {
+      try { ha[0].pulse(intensity, ms); } catch (e) {}
+    }
+  },
+
+  // glow spheres on the hands (warmth ramp), light trails, comfort vignette
+  buildBody: function () {
+    var self = this;
+    this.glowMats = [];
+    ['L', 'R'].forEach(function (side) {
+      [self.hands[side], self.htrack[side]].forEach(function (el) {
+        if (!el) return;
+        var glow = document.createElement('a-sphere');
+        glow.setAttribute('radius', 0.045);
+        glow.setAttribute('material', { shader: 'flat', color: '#ffd9a0', transparent: true, opacity: 0, fog: false });
+        el.appendChild(glow);
+        self.glowMats.push(glow);
+      });
+    });
+
+    this.trails = {};
+    var TRAIL_N = 28;
+    ['L', 'R'].forEach(function (side) {
+      var geo = new THREE.BufferGeometry();
+      var pos = new Float32Array(TRAIL_N * 3);
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      var mat = new THREE.LineBasicMaterial({
+        color: '#9fd4ff', transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false
+      });
+      mat.fog = false;
+      var line = new THREE.Line(geo, mat);
+      line.frustumCulled = false;
+      self.el.object3D.add(line);
+      self.trails[side] = { geo: geo, pos: pos, mat: mat, n: TRAIL_N, primed: false };
+    });
+
+    var vig = document.createElement('a-ring');
+    vig.setAttribute('radius-inner', 0.32);
+    vig.setAttribute('radius-outer', 1.6);
+    vig.setAttribute('position', '0 0 -0.4');
+    vig.setAttribute('material', { shader: 'flat', color: '#000000', transparent: true, opacity: 0, side: 'double', fog: false });
+    this.head.appendChild(vig);
+    this.vignetteEl = vig;
+  },
+
+  tickBody: function (dt) {
+    // trails follow whatever the hands are doing
+    var self = this;
+    ['L', 'R'].forEach(function (side) {
+      var tr = self.trails[side];
+      var p = self.getHandPos(side, self.vt);
+      if (!p) { tr.mat.opacity = 0; tr.primed = false; return; }
+      if (!tr.primed) {
+        for (var i = 0; i < tr.n; i++) {
+          tr.pos[i * 3] = p.x; tr.pos[i * 3 + 1] = p.y; tr.pos[i * 3 + 2] = p.z;
+        }
+        tr.primed = true;
+      } else {
+        for (var j = tr.n - 1; j > 0; j--) {
+          tr.pos[j * 3]     = tr.pos[(j - 1) * 3];
+          tr.pos[j * 3 + 1] = tr.pos[(j - 1) * 3 + 1];
+          tr.pos[j * 3 + 2] = tr.pos[(j - 1) * 3 + 2];
+        }
+        tr.pos[0] = p.x; tr.pos[1] = p.y; tr.pos[2] = p.z;
+      }
+      tr.geo.attributes.position.needsUpdate = true;
+      tr.mat.opacity = 0.22 + 0.2 * self.aware;
+    });
+
+    // warmth: glow + tone swell while a hold gesture is in progress
+    var glowOp = this.warm * 0.5;
+    for (var g = 0; g < this.glowMats.length; g++) {
+      var mesh = this.glowMats[g].getObject3D && this.glowMats[g].getObject3D('mesh');
+      if (mesh) mesh.material.opacity = glowOp;
+    }
+    if (this.warmGain) {
+      this.warmGain.gain.value = this.warm * this.warm * 0.05;
+      this.warmOsc.frequency.value = 200 + this.warm * 180;
+    }
+
+    // comfort vignette eases in while moving, out when standing
+    this.vignetteOpacity += (this.vignetteTarget - this.vignetteOpacity) * Math.min(1, dt * 8);
+    var vmesh = this.vignetteEl.getObject3D && this.vignetteEl.getObject3D('mesh');
+    if (vmesh) vmesh.material.opacity = this.vignetteOpacity;
+  },
+
+  // keep the WebAudio listener glued to the head, so panned sound has a direction
+  updateListener: function () {
+    if (!this.actx || !this.actx.listener) return;
+    var l = this.actx.listener;
+    var hp = this.head.object3D.getWorldPosition(this.vt);
+    this.head.object3D.getWorldQuaternion(this.q1);
+    this.e1.setFromQuaternion(this.q1, 'YXZ');
+    var yaw = this.e1.y;
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    try {
+      if (l.positionX) {
+        l.positionX.value = hp.x; l.positionY.value = hp.y; l.positionZ.value = hp.z;
+        l.forwardX.value = fx; l.forwardY.value = 0; l.forwardZ.value = fz;
+        l.upX.value = 0; l.upY.value = 1; l.upZ.value = 0;
+      } else {
+        l.setPosition(hp.x, hp.y, hp.z);
+        l.setOrientation(fx, 0, fz, 0, 1, 0);
+      }
+    } catch (e) {}
   },
 
   /* ------------------------------------------------ world dressing */
@@ -229,6 +368,29 @@ AFRAME.registerComponent('soul-game', {
     } });
 
     this.buildGrove();
+    this.buildPond();
+  },
+
+  buildPond: function () {
+    // still water to the southeast; at the end, it reflects who you became
+    var pond = document.createElement('a-circle');
+    pond.setAttribute('radius', 2);
+    pond.setAttribute('rotation', '-90 0 0');
+    pond.setAttribute('position', '8 0.012 10');
+    pond.setAttribute('material', { color: '#101f2e', metalness: 0.85, roughness: 0.12 });
+    this.el.appendChild(pond);
+    this.pondEl = pond;
+
+    var n = 12;
+    var st = this.makePoints(n, '#aebfff', 0.02, 0.2);
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * 1.7;
+      st.pos[i * 3]     = 8 + Math.cos(a) * r;
+      st.pos[i * 3 + 1] = 0.04;
+      st.pos[i * 3 + 2] = 10 + Math.sin(a) * r;
+    }
+    st.geo.attributes.position.needsUpdate = true;
+    this.pondStarsMat = st.mat;
   },
 
   buildGrove: function () {
@@ -316,6 +478,8 @@ AFRAME.registerComponent('soul-game', {
     this.tickMsg(dt);
     this.tickMove(dt);
     this.tickWorld(dt, this.time);
+    this.tickBody(dt);
+    this.updateListener();
 
     if (this.endAt !== null && !this.ended && this.time >= this.endAt) this.runEnding();
     if (this.cool > 0) this.cool -= dt;
@@ -340,12 +504,14 @@ AFRAME.registerComponent('soul-game', {
       rp.z = hp.z - ox * s + oz * c;
       this.rig.object3D.rotation.y += th;
       this.lastYaw = null;   // snap turns must not count toward the spin gesture
+      this.vignetteOpacity = 0.7;
     } else if (Math.abs(m.turn) < 0.3) {
       m.snapReady = true;
     }
 
-    // smooth locomotion, head-yaw relative
+    // smooth locomotion, head-yaw relative; vignette narrows the view for comfort
     var mag = Math.hypot(m.x, m.y);
+    this.vignetteTarget = mag > 0.15 ? 0.55 : 0;
     if (mag > 0.15) {
       this.head.object3D.getWorldQuaternion(this.q1);
       this.e1.setFromQuaternion(this.q1, 'YXZ');
@@ -374,7 +540,23 @@ AFRAME.registerComponent('soul-game', {
       var L = this.lerps[i];
       L.obj[L.prop] += (L.target - L.obj[L.prop]) * (1 - Math.exp(-L.rate * dt));
     }
-    for (i = 0; i < this.systems.length; i++) this.systems[i].step(dt, now);
+    for (i = this.systems.length - 1; i >= 0; i--) {
+      var s = this.systems[i];
+      if (s.ttl !== undefined) {
+        s.age = (s.age || 0) + dt;
+        if (s.age >= s.ttl) {
+          if (s.end) s.end();
+          this.systems.splice(i, 1);
+          continue;
+        }
+      }
+      s.step(dt, now);
+    }
+    // the pond wears the sky's color
+    if (this.pondEl) {
+      var pmesh = this.pondEl.getObject3D && this.pondEl.getObject3D('mesh');
+      if (pmesh) pmesh.material.color.copy(this.skyColor);
+    }
     if (this.orbit) this.orbit.object3D.rotation.y += dt * 0.1;
   },
 
@@ -394,14 +576,19 @@ AFRAME.registerComponent('soul-game', {
       if (Math.abs(d) < 1) this.yawAcc = (this.yawAcc + d) * Math.exp(-dt * 0.12);
     }
     this.lastYaw = yaw;
-    if (!this.done.spin && this.cool <= 0 && Math.abs(this.yawAcc) > 6.0) {
+    if (this.cool <= 0 && Math.abs(this.yawAcc) > 6.0) {
       this.yawAcc = 0;
-      this.discover(byId('spin'), null);
-      return;
+      if (this.done.spin) this.echo(byId('spin'));
+      else { this.discover(byId('spin'), null); return; }
     }
 
-    var L = this.connected.L ? this.hands.L.object3D.getWorldPosition(this.v2) : null;
-    var R = this.connected.R ? this.hands.R.object3D.getWorldPosition(this.v3) : null;
+    var L = this.getHandPos('L', this.v2);
+    var R = this.getHandPos('R', this.v3);
+
+    // slow height baseline: rises fast, sinks very slowly (so crouching doesn't drag it)
+    if (hp.y > 0.5) {
+      this.headBase += (hp.y - this.headBase) * Math.min(1, dt * (hp.y > this.headBase ? 0.5 : 0.005));
+    }
 
     // hand speeds: EMA for stillness, instantaneous max for beat-sync peaks
     var self = this;
@@ -429,6 +616,11 @@ AFRAME.registerComponent('soul-game', {
       while (this.peakTimes.length && this.peakTimes[0] < cn - 2.5) this.peakTimes.shift();
     }
     this.lastMotion = motion;
+
+    // tally quiet vs restless time — the ending will remember
+    if (L || R) {
+      if (motion < 0.15) this.stillTime += dt; else this.moveTime += dt;
+    }
 
     if (this.cool <= 0 && L && R) {
       var relLy = L.y - hp.y;
@@ -460,10 +652,22 @@ AFRAME.registerComponent('soul-game', {
     }
 
     if (this.cool <= 0 && (L || R)) {
+      // near-floor threshold scales with the player's height, so seated works too
+      var floorY = Math.min(0.6, Math.max(0.3, this.headBase * 0.33));
       this.holdStep('ground',
-        (L && L.y < 0.35) || (R && R.y < 0.35),
+        (L && L.y < floorY) || (R && R.y < floorY),
         0.8, dt);
     }
+
+    // warmth: how close the strongest in-progress hold is to blooming
+    var warmT = { reach: 1.1, heart: 1.1, wide: 1.1, ground: 0.8, still: 5.0 };
+    var warm = 0;
+    for (var wid in warmT) {
+      if (this.done[wid]) continue;
+      var frac = this.hold[wid] / warmT[wid];
+      if (frac > warm) warm = frac;
+    }
+    this.warm = Math.min(1, warm);
 
     // --- circle tracing (head-yaw frame so it survives the player turning)
     this.sampleT += dt;
@@ -483,26 +687,73 @@ AFRAME.registerComponent('soul-game', {
     this.evalT += dt;
     if (this.evalT >= 0.2) {
       this.evalT = 0;
-      if (!this.done.circle && this.cool <= 0) {
-        var hit = this.circleSweep(this.trace.L) || this.circleSweep(this.trace.R);
+      if (this.cool <= 0) {
+        var hit = this.circleSweep(this.trace.L);
+        var hitHand = hit ? 'left' : null;
+        if (!hit) {
+          hit = this.circleSweep(this.trace.R);
+          if (hit) hitHand = 'right';
+        }
         if (hit) {
-          hit.headPos = hp.clone();
-          hit.yaw = yaw;
           this.trace.L.length = 0;
           this.trace.R.length = 0;
-          this.discover(byId('circle'), hit);
+          if (this.done.circle) {
+            this.echo(byId('circle'));
+          } else {
+            hit.headPos = hp.clone();
+            hit.yaw = yaw;
+            this.circleHand = hitHand;
+            this.discover(byId('circle'), hit);
+          }
         }
       }
     }
   },
 
   holdStep: function (id, cond, threshold, dt) {
-    if (this.done[id]) return;
     this.hold[id] = cond ? this.hold[id] + dt : Math.max(0, this.hold[id] - dt * 2.5);
     if (this.hold[id] >= threshold) {
       this.hold[id] = 0;
-      this.discover(byId(id), null);
+      if (this.done[id]) this.echo(byId(id));
+      else this.discover(byId(id), null);
     }
+  },
+
+  // a found gesture never goes silent: repeating it earns a quiet answer
+  echo: function (g) {
+    var now = this.time;
+    var coolFor = g.id === 'still' ? 60 : 12;
+    if (this.echoCool[g.id] !== undefined && now - this.echoCool[g.id] < coolFor) return;
+    this.echoCool[g.id] = now;
+    var p = this.headWorld();
+    this.playChime(g.note, 0.35, p);
+    this.haptic('L', 0.25, 50);
+    this.haptic('R', 0.25, 50);
+
+    // small shimmer burst in front of the player
+    var n = 14;
+    var pts = this.makePoints(n, '#cfe8ff', 0.03, 0.8);
+    var dirs = [];
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * Math.PI * 2, e = (Math.random() - 0.3);
+      dirs.push([Math.cos(a) * 0.5, e * 0.7, Math.sin(a) * 0.5]);
+      pts.pos[i * 3] = p.x; pts.pos[i * 3 + 1] = p.y - 0.2; pts.pos[i * 3 + 2] = p.z;
+    }
+    pts.geo.attributes.position.needsUpdate = true;
+    var self = this;
+    this.systems.push({
+      ttl: 1.5,
+      step: function (dt) {
+        for (var j = 0; j < n; j++) {
+          pts.pos[j * 3]     += dirs[j][0] * dt;
+          pts.pos[j * 3 + 1] += dirs[j][1] * dt;
+          pts.pos[j * 3 + 2] += dirs[j][2] * dt;
+        }
+        pts.mat.opacity = Math.max(0, pts.mat.opacity - dt * 0.6);
+        pts.geo.attributes.position.needsUpdate = true;
+      },
+      end: function () { self.el.object3D.remove(pts.pts); }
+    });
   },
 
   circleSweep: function (pts) {
@@ -556,7 +807,26 @@ AFRAME.registerComponent('soul-game', {
 
     this.groveGain = ctx.createGain();
     this.groveGain.gain.value = 0;
-    this.groveGain.connect(this.master);
+    // the heartbeat lives at the circle — pan it so the player can hunt it by ear
+    var routed = false;
+    if (ctx.createPanner) {
+      try {
+        var pan = ctx.createPanner();
+        pan.panningModel = 'equalpower';
+        pan.distanceModel = 'inverse';
+        pan.refDistance = 3;
+        pan.rolloffFactor = 0.4;   // mild: the gain curve already handles distance
+        if (pan.positionX) {
+          pan.positionX.value = this.grove.x; pan.positionY.value = 1.4; pan.positionZ.value = this.grove.z;
+        } else {
+          pan.setPosition(this.grove.x, 1.4, this.grove.z);
+        }
+        this.groveGain.connect(pan);
+        pan.connect(this.master);
+        routed = true;
+      } catch (e) {}
+    }
+    if (!routed) this.groveGain.connect(this.master);
 
     // low pad, always breathing under the pulse
     var padGain = ctx.createGain();
@@ -596,8 +866,26 @@ AFRAME.registerComponent('soul-game', {
     o.start(t);
     o.stop(t + 0.35);
 
+    // once fully aware, a quieter rhythm hides between the beats
+    if (this.aware >= 0.999 && !this.deepDone) {
+      var ot = t + this.beatPeriod / 2;
+      var wo = ctx.createOscillator();
+      wo.type = 'triangle';
+      wo.frequency.value = 1046;
+      var wg = ctx.createGain();
+      wg.gain.setValueAtTime(0.0001, ot);
+      wg.gain.exponentialRampToValueAtTime(0.035, ot + 0.008);
+      wg.gain.exponentialRampToValueAtTime(0.0001, ot + 0.12);
+      wo.connect(wg);
+      wg.connect(out);
+      wo.start(ot);
+      wo.stop(ot + 0.2);
+      this.offbeatTimes.push({ t: ot, judged: false });
+    }
+
     // the music blooms only while the player keeps time with it
-    if (this.syncStreak >= 2 && i % 2 === 1) {
+    var groove = Math.max(this.syncStreak, this.deepStreak);
+    if (groove >= 2 && i % 2 === 1) {
       var src = ctx.createBufferSource();
       src.buffer = this.noiseBuf;
       var hp = ctx.createBiquadFilter();
@@ -612,7 +900,7 @@ AFRAME.registerComponent('soul-game', {
       hg.connect(out);
       src.start(t);
     }
-    if (this.syncStreak >= 4) {
+    if (groove >= 4) {
       var PENT = [523, 587, 659, 784, 880];
       var b = ctx.createOscillator();
       b.type = 'sine';
@@ -682,6 +970,39 @@ AFRAME.registerComponent('soul-game', {
       }
       while (this.beatTimes.length && this.beatTimes[0].t < ctxNow - 1.5) this.beatTimes.shift();
 
+      // feel the pulse: both controllers thump on each beat, stronger up close
+      if (vol > 0.05) {
+        for (var hb = 0; hb < this.beatTimes.length; hb++) {
+          var bt = this.beatTimes[hb].t;
+          if (bt <= ctxNow && bt > this.lastBeatHapticT) {
+            this.lastBeatHapticT = bt;
+            this.haptic('L', 0.1 + 0.3 * vol, 45);
+            this.haptic('R', 0.1 + 0.3 * vol, 45);
+          }
+        }
+      }
+
+      // judge the hidden offbeat rhythm (only offered once fully aware)
+      for (var oi = 0; oi < this.offbeatTimes.length; oi++) {
+        var ob = this.offbeatTimes[oi];
+        if (ob.judged || ctxNow < ob.t + 0.24) continue;
+        ob.judged = true;
+        if (!inCircle || this.deepDone) continue;
+        var ohit = false;
+        for (var oj = 0; oj < this.peakTimes.length; oj++) {
+          if (Math.abs(this.peakTimes[oj] - ob.t) < 0.2) { ohit = true; break; }
+        }
+        this.deepStreak = ohit ? this.deepStreak + 1 : 0;
+        if (this.deepStreak >= 8 && !this.deepDone) {
+          this.deepDone = true;
+          this.playChime(1046, 0.8);
+          this.playChime(784, 0.6);
+          this.showText('You found the rhythm under the rhythm.', 6000);
+          this.fxDeep();
+        }
+      }
+      while (this.offbeatTimes.length && this.offbeatTimes[0].t < ctxNow - 1.5) this.offbeatTimes.shift();
+
       // beat-locked glow
       if (this.nextBeatT !== null) {
         var since = ctxNow - (this.nextBeatT - this.beatPeriod);
@@ -727,11 +1048,14 @@ AFRAME.registerComponent('soul-game', {
     if (!g || this.done[g.id] || this.ended) return;
     this.done[g.id] = true;
     this.count++;
+    this.discoveryOrder.push(g.id);
     this.cool = 3;
     this.lastEventT = this.time;
     this.trace.L.length = 0;
     this.trace.R.length = 0;
 
+    this.haptic('L', 0.7, 120);
+    this.haptic('R', 0.7, 120);
     this.playChime(g.note);
     this.showText(g.lines, 5200);
     this.fx[g.id](info);
@@ -746,7 +1070,13 @@ AFRAME.registerComponent('soul-game', {
     var remaining = GESTURES.filter(function (g) { return !this.done[g.id]; }, this);
     if (!remaining.length) return;
     var g = remaining[Math.floor(Math.random() * remaining.length)];
-    this.showText(g.hint, 4500);
+    // awareness turns hints from words into example: a wisp performs the gesture
+    if (this.aware >= 0.3 && Math.random() < 0.7) {
+      this.lastEventT = this.time;
+      this.performGuide(g);
+    } else {
+      this.showText(g.hint, 4500);
+    }
   },
 
   /* ------------------------------------------------ effects */
@@ -973,6 +1303,115 @@ AFRAME.registerComponent('soul-game', {
     } });
   },
 
+  fxDeep: function () {
+    // silver comet rain, a rare thing witnessed once
+    var self = this;
+    var n = 60;
+    var co = this.makePoints(n, '#e8f0ff', 0.06, 0.9);
+    for (var i = 0; i < n; i++) {
+      co.pos[i * 3]     = (Math.random() - 0.5) * 30;
+      co.pos[i * 3 + 1] = 6 + Math.random() * 14;
+      co.pos[i * 3 + 2] = (Math.random() - 0.5) * 30;
+    }
+    co.geo.attributes.position.needsUpdate = true;
+    this.systems.push({
+      ttl: 40,
+      step: function (dt) {
+        for (var j = 0; j < n; j++) {
+          co.pos[j * 3]     += 2.2 * dt;
+          co.pos[j * 3 + 1] -= 3.5 * dt;
+          if (co.pos[j * 3 + 1] < 0) {
+            co.pos[j * 3]     = (Math.random() - 0.5) * 30;
+            co.pos[j * 3 + 1] = 12 + Math.random() * 8;
+            co.pos[j * 3 + 2] = (Math.random() - 0.5) * 30;
+          }
+        }
+        if (this.age > 35) co.mat.opacity = Math.max(0, 0.9 * (1 - (this.age - 35) / 5));
+        co.geo.attributes.position.needsUpdate = true;
+      },
+      end: function () { self.el.object3D.remove(co.pts); }
+    });
+  },
+
+  // a wisp acts out an undiscovered gesture near the player — a hint that is shown, never said
+  performGuide: function (g) {
+    var self = this;
+    var hp = this.headWorld();
+    this.head.object3D.getWorldQuaternion(this.q1);
+    this.e1.setFromQuaternion(this.q1, 'YXZ');
+    var yaw = this.e1.y;
+    var ax = hp.x - Math.sin(yaw) * 1.8;
+    var az = hp.z - Math.cos(yaw) * 1.8;
+
+    // per-gesture choreography: each wisp gets a path fn of u in [0,1]
+    var paths = [];
+    var two = Math.PI * 2;
+    switch (g.id) {
+      case 'reach':
+        paths.push(function (u) { return [ax, 1.0 + u * 1.7, az]; });
+        break;
+      case 'heart':
+        paths.push(function (u) { return [ax - 0.5 * (1 - u), 1.25, az]; });
+        paths.push(function (u) { return [ax + 0.5 * (1 - u), 1.25, az]; });
+        break;
+      case 'wide':
+        paths.push(function (u) { return [ax - 0.8 * u, 1.3, az]; });
+        paths.push(function (u) { return [ax + 0.8 * u, 1.3, az]; });
+        break;
+      case 'ground':
+        paths.push(function (u) { return [ax, 1.3 - u * 1.15, az]; });
+        break;
+      case 'circle':
+        paths.push(function (u) {
+          var a = u * two * 2;
+          return [ax + Math.cos(a) * 0.35 * Math.cos(yaw), 1.3 + Math.sin(a) * 0.35, az - Math.cos(a) * 0.35 * Math.sin(yaw)];
+        });
+        break;
+      case 'still':
+        paths.push(function () { return [ax, 1.2, az]; });
+        break;
+      case 'spin':
+        paths.push(function (u) {
+          var a = yaw + Math.PI + u * two;
+          return [hp.x - Math.sin(a) * 1.4, 1.3, hp.z - Math.cos(a) * 1.4];
+        });
+        break;
+      default:
+        return;
+    }
+
+    var els = paths.map(function () {
+      var w = document.createElement('a-sphere');
+      w.setAttribute('radius', 0.035);
+      w.setAttribute('material', { shader: 'flat', color: '#cfe8ff', transparent: true, opacity: 0, fog: false });
+      self.el.appendChild(w);
+      return w;
+    });
+    this.playChime(g.note, 0.25, { x: ax, y: 1.3, z: az });
+
+    var DUR = 7;
+    this.systems.push({
+      ttl: DUR,
+      step: function () {
+        var u = Math.min(1, this.age / (DUR - 1.5));
+        var fade = this.age < 1 ? this.age
+                 : this.age > DUR - 1.5 ? Math.max(0, (DUR - this.age) / 1.5)
+                 : 1;
+        // 'still' breathes instead of travelling
+        var glow = g.id === 'still' ? 0.4 + 0.5 * Math.abs(Math.sin(this.age * 1.5)) : 0.9;
+        for (var i = 0; i < els.length; i++) {
+          var p = paths[i](u);
+          els[i].object3D.position.set(p[0], p[1], p[2]);
+          var mesh = els[i].getObject3D && els[i].getObject3D('mesh');
+          if (mesh) mesh.material.opacity = fade * glow;
+        }
+      },
+      end: function () {
+        els.forEach(function (w) { if (w.parentNode) w.parentNode.removeChild(w); });
+      }
+    });
+  },
+
   /* ------------------------------------------------ ending */
 
   runEnding: function () {
@@ -1009,9 +1448,60 @@ AFRAME.registerComponent('soul-game', {
       self.orbit.appendChild(a);
     });
 
+    // the poem is assembled from how this player actually played
+    var openers = {
+      reach:  'You began by reaching for something above you.',
+      heart:  'You began at your own heart.',
+      wide:   'You began by opening your arms.',
+      ground: 'You began low, touching the earth.',
+      circle: 'You began with a circle.',
+      still:  'You began in stillness.',
+      spin:   'You began by turning to see it all.'
+    };
+    var closers = {
+      reach:  'You ended reaching upward.',
+      heart:  'You ended holding your heart.',
+      wide:   'You ended wide open.',
+      ground: 'You ended close to the ground.',
+      circle: 'You ended where things begin again.',
+      still:  'You ended perfectly still.',
+      spin:   'You ended in a joyful turn.'
+    };
+    var lines = [];
+    var first = this.discoveryOrder[0];
+    var last = this.discoveryOrder[this.discoveryOrder.length - 1];
+    if (first && openers[first]) lines.push(openers[first]);
+    if (last && last !== first && closers[last]) lines.push(closers[last]);
+    if (this.circleHand) lines.push('Your ' + this.circleHand + ' hand knew the way.');
+    var total = this.stillTime + this.moveTime;
+    if (total > 30) {
+      var stillFrac = this.stillTime / total;
+      if (stillFrac > 0.55)      lines.push('Mostly, you were quiet about it.');
+      else if (stillFrac < 0.25) lines.push('You hardly stopped moving.');
+    }
+    if (this.aware >= 0.999) lines.push('And you learned to keep time with this place.');
+
     setTimeout(function () {
+      if (lines.length) self.showText(lines.join('\n'), 9000);
       self.showText('No one told you who to be.\nYou made yourself out of motion and quiet.\nCarry it with you.', 12000);
     }, 3000);
+
+    // the pond reflects who you became: your words, as a constellation on the water
+    if (this.pondStarsMat) this.lerps.push({ obj: this.pondStarsMat, prop: 'opacity', target: 0.9, rate: 0.4 });
+    words.forEach(function (w, i) {
+      var a = document.createElement('a-text');
+      var ang = (i / words.length) * Math.PI * 2;
+      a.setAttribute('value', w);
+      a.setAttribute('align', 'center');
+      a.setAttribute('color', '#aebfff');
+      a.setAttribute('width', 1.4);
+      a.setAttribute('rotation', '-90 0 0');
+      a.setAttribute('opacity', 0);
+      a.setAttribute('position',
+        (8 + Math.cos(ang) * 1.3) + ' 0.03 ' + (10 + Math.sin(ang) * 1.3));
+      a.setAttribute('animation', { property: 'opacity', from: 0, to: 0.55, dur: 4000, delay: 600 * i, easing: 'easeInQuad' });
+      self.el.appendChild(a);
+    });
   },
 
   /* ------------------------------------------------ message queue */
@@ -1068,21 +1558,49 @@ AFRAME.registerComponent('soul-game', {
       g.connect(master);
       o.start();
     });
+    // warmth tone: silent until a hold gesture is in progress
+    this.warmOsc = ctx.createOscillator();
+    this.warmOsc.type = 'sine';
+    this.warmOsc.frequency.value = 200;
+    this.warmGain = ctx.createGain();
+    this.warmGain.gain.value = 0;
+    this.warmOsc.connect(this.warmGain);
+    this.warmGain.connect(master);
+    this.warmOsc.start();
   },
 
-  playChime: function (f) {
+  // vol scales loudness; pos (optional Vector3-like) places the chime in space
+  playChime: function (f, vol, pos) {
     if (!this.actx) return;
-    var ctx = this.actx, master = this.master, t = ctx.currentTime;
+    vol = vol === undefined ? 1 : vol;
+    var ctx = this.actx, t = ctx.currentTime;
+    var out = this.master;
+    if (pos && ctx.createPanner) {
+      try {
+        var pan = ctx.createPanner();
+        pan.panningModel = 'equalpower';
+        pan.distanceModel = 'inverse';
+        pan.refDistance = 1.5;
+        pan.rolloffFactor = 0.5;
+        if (pan.positionX) {
+          pan.positionX.value = pos.x; pan.positionY.value = pos.y; pan.positionZ.value = pos.z;
+        } else {
+          pan.setPosition(pos.x, pos.y, pos.z);
+        }
+        pan.connect(this.master);
+        out = pan;
+      } catch (e) { out = this.master; }
+    }
     [[f, 0.09, 2.4], [f * 2, 0.03, 1.5], [f * 1.5, 0.02, 1.8]].forEach(function (spec) {
       var o = ctx.createOscillator();
       o.type = 'sine';
       o.frequency.value = spec[0];
       var g = ctx.createGain();
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(spec[1], t + 0.02);
+      g.gain.exponentialRampToValueAtTime(spec[1] * vol, t + 0.02);
       g.gain.exponentialRampToValueAtTime(0.0001, t + spec[2]);
       o.connect(g);
-      g.connect(master);
+      g.connect(out);
       o.start(t);
       o.stop(t + spec[2] + 0.1);
     });
